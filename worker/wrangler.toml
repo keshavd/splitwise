@@ -1,0 +1,15 @@
+name = "fairshare-invites"
+main = "src/index.ts"
+compatibility_date = "2026-08-17"
+workers_dev = true
+preview_urls = false
+
+[vars]
+FIREBASE_PROJECT_ID = "split-wise-clone-28966"
+RESEND_FROM_EMAIL = "Fairshare <onboarding@resend.dev>"
+FAIRSHARE_APP_URL = "https://keshav.ai/splitwise/"
+ALLOWED_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173,https://keshav.ai,https://www.keshav.ai,https://split-wise-clone-28966.web.app,https://split-wise-clone-28966.firebaseapp.com"
+
+[[kv_namespaces]]
+binding = "RATE_LIMITS"
+id = "e4adeeec8ec84770b294600a916e5093"
