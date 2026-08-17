@@ -16,5 +16,7 @@ export type Expense = {
   splitMode?: 'equal' | 'custom' | 'itemized'
   splits?: ExpenseSplit[]
   items?: ExpenseItem[]
+  tipPercent?: number
+  tipAmount?: number
 }
 export type Workspace = { people: Person[]; groups: Group[]; expenses: Expense[] }

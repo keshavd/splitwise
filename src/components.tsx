@@ -11,6 +11,17 @@ export const money = (value: number) => new Intl.NumberFormat('en-US', {
   style: 'currency', currency: 'USD',
 }).format(Math.abs(value))
 
+type DraftExpenseItem = Omit<ExpenseItem, 'amount'> & { amount: string }
+
+function updateDecimal(value: string, update: (next: string) => void) {
+  const normalized = value.replace(',', '.')
+  if (/^\d*(?:\.\d{0,2})?$/.test(normalized)) update(normalized)
+}
+
+function finishDecimal(value: string, update: (next: string) => void) {
+  if (value && Number.isFinite(Number(value))) update(Number(value).toFixed(2))
+}
+
 export function Avatar({ person, small = false }: { person?: Person; small?: boolean }) {
   return <span className={`avatar ${small ? 'small' : ''}`} style={{ background: person?.color }}>
     {person?.initials || '?'}
@@ -69,7 +80,8 @@ export function ExpenseModal({ close, initialGroup }: { close: () => void; initi
   const members = data.people.filter(person => group?.memberIds.includes(person.id))
   const [selected, setSelected] = useState<string[]>(group?.memberIds || [])
   const [customAmounts, setCustomAmounts] = useState<Record<string, string>>({})
-  const [items, setItems] = useState<ExpenseItem[]>([{ id: crypto.randomUUID(), name: '', amount: 0, participantIds: group?.memberIds || [] }])
+  const [items, setItems] = useState<DraftExpenseItem[]>([{ id: crypto.randomUUID(), name: '', amount: '', participantIds: group?.memberIds || [] }])
+  const [tipPercent, setTipPercent] = useState('')
 
   function allocate(total: number, ids: string[]): ExpenseSplit[] {
     if (!ids.length) return []
@@ -79,6 +91,32 @@ export function ExpenseModal({ close, initialGroup }: { close: () => void; initi
     return ids.map((personId, index) => ({ personId, amount: (base + (index < remainder ? 1 : 0)) / 100 }))
   }
 
+  function calculateItemizedAllocation(draftItems: DraftExpenseItem[], calculatedTip: number) {
+    const baseCents: Record<string, number> = {}
+    draftItems.forEach(item => allocate(Number(item.amount) || 0, item.participantIds).forEach(split => {
+      baseCents[split.personId] = (baseCents[split.personId] || 0) + Math.round(split.amount * 100)
+    }))
+
+    const entries = Object.entries(baseCents)
+    const subtotalCents = entries.reduce((sum, [, cents]) => sum + cents, 0)
+    const tipCents = Math.round(calculatedTip * 100)
+    const tipAllocations = entries.map(([personId, cents]) => {
+      const exact = subtotalCents ? tipCents * cents / subtotalCents : 0
+      return { personId, cents: Math.floor(exact), fraction: exact - Math.floor(exact) }
+    })
+    let remainder = tipCents - tipAllocations.reduce((sum, split) => sum + split.cents, 0)
+    tipAllocations.sort((a, b) => b.fraction - a.fraction)
+    tipAllocations.forEach(split => {
+      if (remainder > 0) { split.cents += 1; remainder -= 1 }
+    })
+    const tipByPerson = Object.fromEntries(tipAllocations.map(split => [split.personId, split.cents]))
+    return entries.map(([personId, cents]) => ({
+      personId,
+      amount: (cents + (tipByPerson[personId] || 0)) / 100,
+      tipAmount: (tipByPerson[personId] || 0) / 100,
+    }))
+  }
+
   function changeGroup(nextId: string) {
     const nextGroup = data.groups.find(item => item.id === nextId)
     const ids = nextGroup?.memberIds || []
@@ -86,14 +124,15 @@ export function ExpenseModal({ close, initialGroup }: { close: () => void; initi
     setSelected(ids)
     setPaidBy(ids.includes(paidBy) ? paidBy : ids[0] || 'you')
     setCustomAmounts({})
-    setItems([{ id: crypto.randomUUID(), name: '', amount: 0, participantIds: ids }])
+    setItems([{ id: crypto.randomUUID(), name: '', amount: '', participantIds: ids }])
+    setTipPercent('')
   }
 
   function toggleSelected(id: string) {
     setSelected(current => current.includes(id) ? current.filter(item => item !== id) : [...current, id])
   }
 
-  function updateItem(id: string, patch: Partial<ExpenseItem>) {
+  function updateItem(id: string, patch: Partial<DraftExpenseItem>) {
     setItems(current => current.map(item => item.id === id ? { ...item, ...patch } : item))
   }
 
@@ -104,10 +143,14 @@ export function ExpenseModal({ close, initialGroup }: { close: () => void; initi
   }
 
   const numericAmount = Number(amount) || 0
-  const itemTotal = items.reduce((sum, item) => sum + (Number(item.amount) || 0), 0)
+  const itemSubtotal = items.reduce((sum, item) => sum + (Number(item.amount) || 0), 0)
+  const numericTipPercent = Math.max(0, Number(tipPercent) || 0)
+  const tipAmount = Math.round(itemSubtotal * numericTipPercent) / 100
+  const itemTotal = Math.round((itemSubtotal + tipAmount) * 100) / 100
+  const itemizedAllocation = calculateItemizedAllocation(items, tipAmount)
   const total = mode === 'itemized' ? itemTotal : numericAmount
   const customTotal = members.reduce((sum, person) => sum + (Number(customAmounts[person.id]) || 0), 0)
-  const itemizedValid = items.length > 0 && items.every(item => item.name.trim() && item.amount > 0 && item.participantIds.length > 0)
+  const itemizedValid = items.length > 0 && items.every(item => item.name.trim() && Number(item.amount) > 0 && item.participantIds.length > 0)
   const valid = Boolean(description.trim() && total > 0 && (mode === 'equal' ? selected.length : mode === 'custom' ? Math.abs(customTotal - numericAmount) < .01 && customTotal > 0 : itemizedValid))
 
   if (!data.groups.length) return <div className="modal-backdrop"><div className="modal compact">
@@ -123,11 +166,10 @@ export function ExpenseModal({ close, initialGroup }: { close: () => void; initi
     if (mode === 'equal') splits = allocate(total, selected)
     if (mode === 'custom') splits = members.map(person => ({ personId: person.id, amount: Number(customAmounts[person.id]) || 0 })).filter(split => split.amount > 0)
     if (mode === 'itemized') {
-      const ledger: Record<string, number> = {}
-      items.forEach(item => allocate(item.amount, item.participantIds).forEach(split => { ledger[split.personId] = (ledger[split.personId] || 0) + split.amount }))
-      splits = Object.entries(ledger).map(([personId, splitAmount]) => ({ personId, amount: Math.round(splitAmount * 100) / 100 }))
+      splits = itemizedAllocation.map(({ personId, amount: splitAmount }) => ({ personId, amount: splitAmount }))
     }
-    addExpense({ description, amount: total, groupId, paidBy, participantIds: splits.map(split => split.personId), splits, splitMode: mode, items: mode === 'itemized' ? items : undefined, date, category: mode === 'itemized' ? 'Food' : 'General' })
+    const savedItems = mode === 'itemized' ? items.map(item => ({ ...item, amount: Number(item.amount) })) : undefined
+    addExpense({ description, amount: total, groupId, paidBy, participantIds: splits.map(split => split.personId), splits, splitMode: mode, items: savedItems, tipPercent: mode === 'itemized' && numericTipPercent ? numericTipPercent : undefined, tipAmount: mode === 'itemized' && tipAmount ? tipAmount : undefined, date, category: mode === 'itemized' ? 'Food' : 'General' })
     close()
   }
 
@@ -140,13 +182,13 @@ export function ExpenseModal({ close, initialGroup }: { close: () => void; initi
       <label>Paid by<select value={paidBy} onChange={e => setPaidBy(e.target.value)}>{members.map(person => <option key={person.id} value={person.id}>{person.id === 'you' ? 'You' : person.name}</option>)}</select></label>
       <div className="split-tabs"><button type="button" className={mode === 'equal' ? 'active' : ''} onClick={() => setMode('equal')}>Equal</button><button type="button" className={mode === 'custom' ? 'active' : ''} onClick={() => setMode('custom')}>Custom</button><button type="button" className={mode === 'itemized' ? 'active' : ''} onClick={() => setMode('itemized')}>Itemized</button></div>
 
-      {mode !== 'itemized' && <label>Bill total<div className="amount-input"><span>$</span><input inputMode="decimal" value={amount} onChange={e => setAmount(e.target.value)} placeholder="0.00" required /></div></label>}
+      {mode !== 'itemized' && <label>Bill total<div className="amount-input"><span>$</span><input inputMode="decimal" value={amount} onChange={e => updateDecimal(e.target.value, setAmount)} onBlur={() => finishDecimal(amount, setAmount)} placeholder="0.00" required /></div></label>}
 
       {mode === 'equal' && <div className="ledger-panel"><div className="ledger-heading"><b>Who was included?</b><span>{selected.length} selected</span></div><div className="participant-grid">{members.map(person => <button type="button" className={selected.includes(person.id) ? 'selected' : ''} onClick={() => toggleSelected(person.id)} key={person.id}><Avatar person={person} small /><span>{person.id === 'you' ? 'You' : person.name}</span><i>{selected.includes(person.id) && <Check />}</i></button>)}</div>{selected.length > 0 && numericAmount > 0 && <div className="ledger-total"><span>{money(numericAmount)} split {selected.length} ways</span><strong>{money(numericAmount / selected.length)} each</strong></div>}</div>}
 
-      {mode === 'custom' && <div className="ledger-panel"><div className="ledger-heading"><b>Enter each person’s share</b><span>{money(customTotal)} of {money(numericAmount)}</span></div><div className="custom-splits">{members.map(person => <label key={person.id}><Avatar person={person} small /><span>{person.id === 'you' ? 'You' : person.name}</span><div><b>$</b><input inputMode="decimal" value={customAmounts[person.id] || ''} onChange={e => setCustomAmounts(current => ({ ...current, [person.id]: e.target.value }))} placeholder="0.00" /></div></label>)}</div>{numericAmount > 0 && Math.abs(customTotal - numericAmount) >= .01 && <p className="ledger-error">{customTotal < numericAmount ? `${money(numericAmount - customTotal)} left to assign` : `${money(customTotal - numericAmount)} over the bill total`}</p>}</div>}
+      {mode === 'custom' && <div className="ledger-panel"><div className="ledger-heading"><b>Enter each person’s share</b><span>{money(customTotal)} of {money(numericAmount)}</span></div><div className="custom-splits">{members.map(person => <label key={person.id}><Avatar person={person} small /><span>{person.id === 'you' ? 'You' : person.name}</span><div><b>$</b><input inputMode="decimal" value={customAmounts[person.id] || ''} onChange={e => updateDecimal(e.target.value, next => setCustomAmounts(current => ({ ...current, [person.id]: next })))} onBlur={() => finishDecimal(customAmounts[person.id] || '', next => setCustomAmounts(current => ({ ...current, [person.id]: next })))} placeholder="0.00" /></div></label>)}</div>{numericAmount > 0 && Math.abs(customTotal - numericAmount) >= .01 && <p className="ledger-error">{customTotal < numericAmount ? `${money(numericAmount - customTotal)} left to assign` : `${money(customTotal - numericAmount)} over the bill total`}</p>}</div>}
 
-      {mode === 'itemized' && <div className="ledger-panel itemized-panel"><div className="ledger-heading"><b>Receipt items</b><strong>{money(itemTotal)}</strong></div>{items.map((item, index) => <div className="receipt-item" key={item.id}><div className="receipt-line"><span>{index + 1}</span><input value={item.name} onChange={e => updateItem(item.id, { name: e.target.value })} placeholder="Burger, shared fries, tip…" /><div className="receipt-price"><b>$</b><input inputMode="decimal" value={item.amount || ''} onChange={e => updateItem(item.id, { amount: Number(e.target.value) })} placeholder="0.00" /></div>{items.length > 1 && <button type="button" className="icon-button remove-item" onClick={() => setItems(current => current.filter(entry => entry.id !== item.id))}><Trash2 /></button>}</div><div className="item-people"><small>Assign to</small>{members.map(person => <button type="button" title={person.name} className={item.participantIds.includes(person.id) ? 'selected' : ''} onClick={() => toggleItemPerson(item.id, person.id)} key={person.id}><Avatar person={person} small /></button>)}</div></div>)}<button type="button" className="add-line" onClick={() => setItems(current => [...current, { id: crypto.randomUUID(), name: '', amount: 0, participantIds: group?.memberIds || [] }])}><Plus />Add receipt item</button><p className="itemized-hint">Add tax, tip, or an Uber fee as another line and choose who shares it.</p></div>}
+      {mode === 'itemized' && <div className="ledger-panel itemized-panel"><div className="ledger-heading"><b>Receipt items</b><strong>{money(itemSubtotal)}</strong></div>{items.map((item, index) => <div className="receipt-item" key={item.id}><div className="receipt-line"><span>{index + 1}</span><input value={item.name} onChange={e => updateItem(item.id, { name: e.target.value })} placeholder="Burger, shared fries…" /><div className="receipt-price"><b>$</b><input inputMode="decimal" value={item.amount} onChange={e => updateDecimal(e.target.value, next => updateItem(item.id, { amount: next }))} onBlur={() => finishDecimal(item.amount, next => updateItem(item.id, { amount: next }))} placeholder="0.00" /></div>{items.length > 1 && <button type="button" className="icon-button remove-item" onClick={() => setItems(current => current.filter(entry => entry.id !== item.id))}><Trash2 /></button>}</div><div className="item-people"><small>Assign to</small>{members.map(person => <button type="button" title={person.name} className={item.participantIds.includes(person.id) ? 'selected' : ''} onClick={() => toggleItemPerson(item.id, person.id)} key={person.id}><Avatar person={person} small /></button>)}</div></div>)}<button type="button" className="add-line" onClick={() => setItems(current => [...current, { id: crypto.randomUUID(), name: '', amount: '', participantIds: group?.memberIds || [] }])}><Plus />Add receipt item</button><div className="tip-section"><div className="tip-heading"><div><b>Add tip</b><small>Split by each person’s assigned items</small></div><strong>{money(tipAmount)}</strong></div><div className="tip-controls"><button type="button" className={!tipPercent ? 'active' : ''} onClick={() => setTipPercent('')}>None</button>{[15, 18, 20, 25].map(percent => <button type="button" className={numericTipPercent === percent ? 'active' : ''} onClick={() => setTipPercent(String(percent))} key={percent}>{percent}%</button>)}<label><input aria-label="Custom tip percentage" inputMode="decimal" value={tipPercent} onChange={e => updateDecimal(e.target.value, setTipPercent)} placeholder="Custom" /><span>%</span></label></div>{numericTipPercent > 0 && itemizedAllocation.length > 0 && <div className="tip-breakdown">{itemizedAllocation.map(split => { const person = members.find(member => member.id === split.personId); return <span key={split.personId}>{split.personId === 'you' ? 'You' : person?.name}: +{money(split.tipAmount)}</span> })}</div>}</div><p className="itemized-hint">Tax or Uber fees can still be added as receipt items and assigned to the right people.</p></div>}
 
       <div className="expense-submit"><div><span>Total</span><strong>{money(total)}</strong></div><button className="primary" disabled={!valid}>Add expense</button></div>
     </form>
