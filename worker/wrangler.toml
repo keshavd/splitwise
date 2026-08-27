@@ -6,7 +6,7 @@ preview_urls = false
 
 [vars]
 FIREBASE_PROJECT_ID = "split-wise-clone-28966"
-RESEND_FROM_EMAIL = "Fairshare <onboarding@resend.dev>"
+RESEND_FROM_EMAIL = "Fairshare <invites@send.keshav.ai>"
 FAIRSHARE_APP_URL = "https://keshav.ai/splitwise/"
 ALLOWED_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173,https://keshav.ai,https://www.keshav.ai,https://split-wise-clone-28966.web.app,https://split-wise-clone-28966.firebaseapp.com"
 
